@@ -78,7 +78,10 @@ def extract(path, bucket):
                                     ("file_path", "command", "pattern", "path", "glob"))
                     if f"{bucket}/memory/" not in blob:
                         continue
-                    m = re.search(r"/memory/([\w.\-]+\.md)", blob)
+                    # 🔴 必须绑定**本桶**路径再取档名：blob 是多个字段拼起来的，
+                    #    只匹配 `/memory/xxx.md` 会把命令里提到的**跨桶**档名当成本桶答案
+                    #    （实测 cc-service 的题库里混进了 cruna-* 的档，那些题必然答不对）。
+                    m = re.search(re.escape(bucket) + r"/memory/([\w.\-]+\.md)", blob)
                     if m and m.group(1) != "MEMORY.md" and not m.group(1).startswith("_index-"):
                         pending["answer"] = m.group(1)
                         break
@@ -105,6 +108,14 @@ def main():
             p["session"] = os.path.basename(path)
             allp.append(p)
 
+    # 🔴 剔除「标准答案档如今已不存在」的题：历史上读过、后来被删或改名，
+    #    索引里自然也不会有它 ⇒ 这题无解，留着只会当共模噪音压低分数。
+    #    这是客观事实（文件在不在）不是主观判断，可以放心删。
+    mem_dir = os.path.join(BASE, args.bucket, "memory")
+    before_n = len(allp)
+    allp = [p_ for p_ in allp if os.path.exists(os.path.join(mem_dir, p_["answer"]))]
+    gone = before_n - len(allp)
+
     # 去重：同一句话问过多次只留一条，否则高频问法会主导分数
     seen, uniq = set(), []
     for p in allp:
@@ -121,7 +132,8 @@ def main():
                    "seed": args.seed, "total_found": len(uniq), "items": picked},
                   f, ensure_ascii=False, indent=2)
 
-    print(f"共挖到 {len(allp)} 组配对，去重后 {len(uniq)} 组，取 {len(picked)} 题 → {os.path.abspath(args.out)}")
+    print(f"共挖到 {len(allp)+gone} 组配对（剔除 {gone} 组答案档已不存在的），"
+          f"去重后 {len(uniq)} 组，取 {len(picked)} 题 → {os.path.abspath(args.out)}")
     if picked:
         dist = {}
         for p in picked:
