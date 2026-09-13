@@ -29,9 +29,21 @@ import re
 import shutil
 import sys
 
-HASH_RE = re.compile(r"`(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}`")
-DATE_RE = re.compile(r"(?<![0-9-])(?:\d{4}-\d{2}-\d{2}|\d{2}-\d{2})(?![0-9-])")
-FLAG_RE = re.compile(r"[✅🆕]")
+# 🔴 判据**从闸里导入**，不自己写第二份。
+#    原来这里的 HASH_RE 要求反引号包裹，而闸四的不要求 ⇒ `HEAD 009ee98` 这种裸 hash
+#    delog 不删也不给豁免，闸四却拦，整桶写不进去。两份正则必然漂移。
+def _load_gate():
+    import importlib.machinery
+    import importlib.util
+    hp = os.path.expanduser("~/.claude/hooks/guard-memory-landing.py")
+    spec = importlib.util.spec_from_file_location(
+        "gate", hp, loader=importlib.machinery.SourceFileLoader("gate", hp))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.HASH_RE, mod.DATE_RE, mod.FLAG_RE
+
+
+HASH_RE, DATE_RE, FLAG_RE = _load_gate()
 LINK_RE = re.compile(r"\]\(([^)]+\.md)\)")
 # 链接目标里的日期是文件名的一部分，不是日志 ⇒ 判之前先挡住
 LINKTARGET_RE = re.compile(r"\]\([^)]*\)")

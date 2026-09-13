@@ -28,7 +28,11 @@ import shutil
 import sys
 import time
 
-ROW_RE = re.compile(r"^(\s*-\s.*?\*\*)[：:](.+)$")
+# 两种写法都要认，否则只认冒号会把破折号那种桶当成「没什么可整理的」：
+#   - **[标题](档.md)（场景）**：正文      ← cruna-ai / cc-service
+#   - [标题](档.md) — 正文                 ← newera-video / wecom-twin-camp
+ROW_RE = re.compile(r"^(\s*-\s.*?\*\*)[：:](.+)$"
+                    r"|^(\s*-\s\[[^\]]+\]\([^)]+\)[^—–]{0,40}?)\s[—–]\s(.+)$")
 LINK_RE = re.compile(r"\]\(([^)]+\.md)\)")
 MIN_BODY = 40
 # 🔴 正文里的反引号标识符是**检索锚点**不是论证（P2 ①：命令名、标识符、报错子串逐字保留）。
@@ -39,9 +43,22 @@ CODE_RE = re.compile(r"`[^`\n]{2,28}`")
 # 闸四会拦「新增行里含 hash/日期/状态标」。下沉让整行内容变了 ⇒ 那些
 # delog 时守恒失败而保留下来的 token 会让这一行被当成新增日志行拦下。
 # 它们该留（删了可达性只剩 git），所以走闸四自己的豁免出口，而不是绕闸。
-LOG_RE = re.compile(r"`(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}`"
-                    r"|(?<![0-9-])(?:\d{4}-\d{2}-\d{2}|\d{2}-\d{2})(?![0-9-])|[✅🆕]")
-SCRUB_RE = re.compile(r"\]\([^)]*\)|<!--.*?-->")
+# 🔴 判据从闸导入，不自己写第三份 —— 同一个坑已经踩了三次
+#    （index-reconcile 写过「必须共用一把尺」，delog 和这里还是各写了一份，
+#     都要求反引号包裹，于是 `HEAD 009ee98` 这种裸 hash 漏判、整桶被闸拒）。
+def _load_gate():
+    import importlib.machinery
+    import importlib.util
+    hp = os.path.expanduser("~/.claude/hooks/guard-memory-landing.py")
+    spec = importlib.util.spec_from_file_location(
+        "gate", hp, loader=importlib.machinery.SourceFileLoader("gate", hp))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.HASH_RE, mod.DATE_RE, mod.FLAG_RE, mod.SCRUB_RE
+
+
+_H, _D, _F, SCRUB_RE = _load_gate()
+LOG_RE = re.compile("|".join(f"(?:{r.pattern})" for r in (_H, _D, _F)))
 EXEMPT = "<!--闸四豁免:delog 时守恒失败保留的日志 token，专题档里查不到-->"
 MAX_ANCHORS = 6
 LINE_LIMIT = 200
@@ -62,16 +79,29 @@ def main():
     out, moves, skipped = [], [], []
     for i, line in enumerate(lines, 1):
         m = ROW_RE.match(line)
-        if not m or len(m.group(2)) < args.min_body:
+        if not m:
             out.append(line)
             continue
-        hook, body = m.group(1), m.group(2).strip()
+        # 冒号式落在 1/2 组，破折号式落在 3/4 组
+        hook, body = (m.group(1), m.group(2)) if m.group(1) is not None else (m.group(3), m.group(4))
+        if body is None or len(body) < args.min_body:
+            out.append(line)
+            continue
+        sep = "：" if m.group(1) is not None else " — "
+        body = body.strip()
 
         # 🔴 留下的钩子里必须还有链接。有些行的链接在冒号**后面**
         #    （`- 🔴 **命名**：… [详见](brand-cctv-rename.md)`），搬走正文＝把链接一起搬走，
         #    那一行就成了指不到任何档的孤条 —— 钩子断了比索引长更糟。
         if not LINK_RE.search(hook):
             skipped.append((i, "链接在冒号后，搬走会断链", line[:60]))
+            out.append(line)
+            continue
+
+        if len(hook) > LINE_LIMIT:
+            # 原行就是存量超长行，留下的 hook 仍超 200 ⇒ 闸一会当「新增超长行」拦下。
+            # 它区分不了「新加的长行」和「变短了的存量行」，不为这几行松闸。
+            skipped.append((i, f"钩子本身 {len(hook)} 字符仍超 200", line[:60]))
             out.append(line)
             continue
 
@@ -89,15 +119,24 @@ def main():
         for c in CODE_RE.findall(body):
             if c not in seen:
                 seen.add(c); anchors.append(c)
-        need_exempt = bool(LOG_RE.search(SCRUB_RE.sub("", hook))) and "闸四豁免" not in hook
-        budget = LINE_LIMIT - (len(EXEMPT) if need_exempt else 0)
+        # 预算按最坏情况留出豁免注释的位置（这一行到底要不要豁免，拼完才知道）
+        budget = LINE_LIMIT - len(EXEMPT)
         kept = []
         for c in anchors[:MAX_ANCHORS]:
-            if len(hook + "：" + " ".join(kept + [c])) <= budget:
+            if len(hook + sep + " ".join(kept + [c])) <= budget:
                 kept.append(c)
-        new_line = hook + ("：" + " ".join(kept) if kept else "")
-        if need_exempt:
+        new_line = hook + (sep + " ".join(kept) if kept else "")
+
+        # 🔴 拿闸的判据比**最终这一行**，不是比 hook ——
+        #    从 body 捞回来的锚点里也可能带 hash，闸看整行，我只看 hook 就会漏判。
+        if LOG_RE.search(SCRUB_RE.sub("", new_line)) and "闸四豁免" not in new_line:
             new_line += EXEMPT
+
+        # 最终兜底：拼完仍超 200 就整行跳过，不为它松闸
+        if len(new_line) > LINE_LIMIT:
+            skipped.append((i, f"成行后 {len(new_line)} 字符仍超 200", line[:60]))
+            out.append(line)
+            continue
 
         moves.append({"line": i, "target": os.path.basename(local[0]),
                       "body": body, "hook": new_line, "anchors": len(kept)})
