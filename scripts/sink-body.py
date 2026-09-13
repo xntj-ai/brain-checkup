@@ -36,6 +36,13 @@ MIN_BODY = 40
 #    `checkLogin` / `manualLogin` 被搬走后，模型再也认不出该点开哪个档（稳定命中→错）。
 #    ⇒ 搬正文，但把锚点留在索引行。
 CODE_RE = re.compile(r"`[^`\n]{2,28}`")
+# 闸四会拦「新增行里含 hash/日期/状态标」。下沉让整行内容变了 ⇒ 那些
+# delog 时守恒失败而保留下来的 token 会让这一行被当成新增日志行拦下。
+# 它们该留（删了可达性只剩 git），所以走闸四自己的豁免出口，而不是绕闸。
+LOG_RE = re.compile(r"`(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}`"
+                    r"|(?<![0-9-])(?:\d{4}-\d{2}-\d{2}|\d{2}-\d{2})(?![0-9-])|[✅🆕]")
+SCRUB_RE = re.compile(r"\]\([^)]*\)|<!--.*?-->")
+EXEMPT = "<!--闸四豁免:delog 时守恒失败保留的日志 token，专题档里查不到-->"
 MAX_ANCHORS = 6
 LINE_LIMIT = 200
 SECTION = "## 从主索引下沉的判据"
@@ -82,12 +89,15 @@ def main():
         for c in CODE_RE.findall(body):
             if c not in seen:
                 seen.add(c); anchors.append(c)
+        need_exempt = bool(LOG_RE.search(SCRUB_RE.sub("", hook))) and "闸四豁免" not in hook
+        budget = LINE_LIMIT - (len(EXEMPT) if need_exempt else 0)
         kept = []
         for c in anchors[:MAX_ANCHORS]:
-            trial = hook + "：" + " ".join(kept + [c])
-            if len(trial) <= LINE_LIMIT:
+            if len(hook + "：" + " ".join(kept + [c])) <= budget:
                 kept.append(c)
         new_line = hook + ("：" + " ".join(kept) if kept else "")
+        if need_exempt:
+            new_line += EXEMPT
 
         moves.append({"line": i, "target": os.path.basename(local[0]),
                       "body": body, "hook": new_line, "anchors": len(kept)})
