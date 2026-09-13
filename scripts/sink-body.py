@@ -16,6 +16,12 @@
   · 冒号后不足 40 字符的（短危险提示，P2 ② 允许留在目录页）
   · 链接指向别的桶或文件不存在的
 
+🔴 不是每个桶都该下沉 —— 先看干跑的收益，再决定做不做：
+  newera-video 实测收益只有 22%，因为它的索引行**本来就是关键词表**而不是「钩子+论证」。
+  盲测：激进版退步 1 题、保守版 1 题、最保守版 3 题（而且退步那行整行未动 ——
+  别的行变短后改变了模型在候选之间的相对权重）。⇒ 那个桶只做去日志化，不下沉。
+  经验判据：**干跑收益 <30% 的桶别做**，风险大于收益。
+
 用法：
   python3 sink-body.py <MEMORY.md>                    # 干跑，看会搬什么
   python3 sink-body.py <MEMORY.md> --apply
@@ -61,6 +67,10 @@ _H, _D, _F, SCRUB_RE = _load_gate()
 LOG_RE = re.compile("|".join(f"(?:{r.pattern})" for r in (_H, _D, _F)))
 EXEMPT = "<!--闸四豁免:delog 时守恒失败保留的日志 token，专题档里查不到-->"
 MAX_ANCHORS = 6
+# 没有反引号锚点时的兜底：留正文第一个语义段（逐字，不改写）
+SEG_RE = re.compile(r"[·；;]")
+FALLBACK_MAX = 60          # 第一段太长就截到这里
+MIN_GAIN_RATIO = 0.30      # 留下来的相比原文省不到三成 ⇒ 这行不值得搬
 LINE_LIMIT = 200
 SECTION = "## 从主索引下沉的判据"
 
@@ -119,6 +129,33 @@ def main():
         for c in CODE_RE.findall(body):
             if c not in seen:
                 seen.add(c); anchors.append(c)
+
+        # 🔴 一个反引号都没有（中文正文的常态）⇒ 留第一个语义段，不能什么都不留。
+        #    什么都不留＝把这条索引掏成一个光标题，检索时勾不出来。
+        if not anchors:
+            segs = [x.strip() for x in SEG_RE.split(body) if x.strip()]
+            # 🔴 正文本身就是「A · B · C · D」的并列关键词列表时，**整条都是钩子不是论证** ——
+            #    切第一段等于只留第一个关键词。实测踩到：交付台那行的
+            #    「下单表格 · 制作页 · 素材库 · 建模闭环 · 结算开票 · 打包下载」
+            #    被切成只剩「下单表格」，盲测里当场表现为稳定命中→错。
+            #    判据：段数 ≥3 且平均段长 <15 字符 ⇒ 是词表，整行不动。
+            # 🔴 用**中位数**不用平均数：平均数会被首尾的长段带偏。
+            #    交付台那行 7 段 = [30, 3, 3, 4, 4, …]，中间五段全是短词（就是关键词表），
+            #    平均 19.4 判不出来、中位数 4 一眼就是。平均数被离群值带偏是这类判据的经典死法。
+            seg_lens = sorted(len(x) for x in segs)
+            median = seg_lens[len(seg_lens) // 2]
+            if len(segs) >= 3 and median < 15:
+                skipped.append((i, "正文是并列关键词列表，整条都是钩子", line[:60]))
+                out.append(line)
+                continue
+            head = segs[0] if segs else body
+            if len(head) > FALLBACK_MAX:
+                head = head[:FALLBACK_MAX] + "…"
+            if len(body) - len(head) < len(body) * MIN_GAIN_RATIO:
+                skipped.append((i, f"无锚点且只能省 {len(body)-len(head)} 字符，不值得搬", line[:60]))
+                out.append(line)
+                continue
+            anchors = [head]
         # 预算按最坏情况留出豁免注释的位置（这一行到底要不要豁免，拼完才知道）
         budget = LINE_LIMIT - len(EXEMPT)
         kept = []
