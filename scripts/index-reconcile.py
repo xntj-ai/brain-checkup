@@ -133,7 +133,10 @@ def audit_bucket(mem_dir):
         if FLAG_RE.search(probe):
             hits.append("✅🆕")
         if hits:
-            logged.append((i, "/".join(hits), len(line), line.strip()[:60]))
+            # 删掉这三类片段后能省多少 —— **收益下界**：真正的去日志化还要移走
+            # 论证、条件、历史与接口路径，省得比这多。锚点逐字不动，所以只量这三类。
+            stripped = FLAG_RE.sub("", DATE_RE.sub("", HASH_RE.sub("", line)))
+            logged.append((i, "/".join(hits), len(line), line.strip()[:60], len(line) - len(stripped)))
 
     again = 0
     for p in glob.glob(os.path.join(mem_dir, "*.md")):
@@ -160,15 +163,16 @@ def render(results):
         "> 本脚本只读。死链与孤儿是**线索不是结论** —— 按 audit-verification，",
         "> 报「不存在」之前必须逐条抽验（上一轮 4 条死链里 3 条是误报）。",
         "",
-        "| 桶 | 索引字符 | 非空行 | 专题档 | 死链 | name 异常 | 未收录 | 日志化行 | 又踩 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| 桶 | 索引字符 | 非空行 | 专题档 | 死链 | name 异常 | 未收录 | 日志化行 | 三类片段可省 | 又踩 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         bucket = os.path.basename(os.path.dirname(r["dir"]))
         out.append(
             f"| {bucket} | {r['chars']} | {r['lines']} | {r['files']} | {len(r['dead'])} | "
             f"{len(r['mismatched'])} | {len(r['orphans'])} | "
-            f"{len(r['logged'])}（{len(r['logged'])/max(r['lines'],1):.0%}） | {r['again']} |"
+            f"{len(r['logged'])}（{len(r['logged'])/max(r['lines'],1):.0%}） | "
+            f"-{sum(x[4] for x in r['logged'])}（{sum(x[4] for x in r['logged'])/max(r['chars'],1):.1%}） | {r['again']} |"
         )
 
     for r in results:
@@ -185,8 +189,8 @@ def render(results):
                        "  " + " · ".join(f"`{o}`" for o in r["orphans"])]
         if r["logged"]:
             detail += ["", f"**日志化存量：{len(r['logged'])} 行（第 2 步去日志化的工作量）**", "",
-                       "| 行 | 命中 | 字符 | 开头 |", "|---|---|---|---|"] + \
-                      [f"| {i} | {h} | {n} | {s} |" for i, h, n, s in r["logged"][:40]]
+                       "| 行 | 命中 | 字符 | 可省 | 开头 |", "|---|---|---|---|---|"] + \
+                      [f"| {i} | {h} | {n} | -{d} | {s} |" for i, h, n, s, d in r["logged"][:40]]
             if len(r["logged"]) > 40:
                 detail.append(f"| … | | | 另有 {len(r['logged'])-40} 行 |")
         if detail:
