@@ -37,7 +37,10 @@ import time
 # 两种写法都要认，否则只认冒号会把破折号那种桶当成「没什么可整理的」：
 #   - **[标题](档.md)（场景）**：正文      ← cruna-ai / cc-service
 #   - [标题](档.md) — 正文                 ← newera-video / wecom-twin-camp
-ROW_RE = re.compile(r"^(\s*-\s.*?\*\*)[：:](.+)$"
+# 🔴 冒号式的 `.*?` 必须限长：不限的话它会在破折号式的行上一路回溯，
+#    找到行尾某个 `**：` 才停 —— livetovideo 那行 1791 字符，hook 被算成 1476，
+#    于是整行被当成「钩子本身就超 200」跳过，而它恰恰是最该处理的。
+ROW_RE = re.compile(r"^(\s*-\s.{0,120}?\*\*)[：:](.+)$"
                     r"|^(\s*-\s\[[^\]]+\]\([^)]+\)[^—–]{0,40}?)\s[—–]\s(.+)$")
 LINK_RE = re.compile(r"\]\(([^)]+\.md)\)")
 MIN_BODY = 40
@@ -124,59 +127,60 @@ def main():
             out.append(line)
             continue
 
-        # 把正文里的标识符锚点捞回索引行，逐字不改；受单行 200 字符闸约束
-        seen, anchors = set(), []
-        for c in CODE_RE.findall(body):
-            if c not in seen:
-                seen.add(c); anchors.append(c)
+        # 在 200 字符预算内**从正文开头按语义段尽量装**，装不下的才下沉。
+        # 不再「有反引号就只留反引号、没有就只留第一段」那种二选一 ——
+        # 盲测抓到两种死法：被 `；` 切掉后续钩子、以及因为有一个反引号就把中文全丢了。
+        segs = [x.strip() for x in SEG_RE.split(body) if x.strip()]
 
-        # 🔴 一个反引号都没有（中文正文的常态）⇒ 留第一个语义段，不能什么都不留。
-        #    什么都不留＝把这条索引掏成一个光标题，检索时勾不出来。
-        if not anchors:
-            segs = [x.strip() for x in SEG_RE.split(body) if x.strip()]
-            # 🔴 正文本身就是「A · B · C · D」的并列关键词列表时，**整条都是钩子不是论证** ——
-            #    切第一段等于只留第一个关键词。实测踩到：交付台那行的
-            #    「下单表格 · 制作页 · 素材库 · 建模闭环 · 结算开票 · 打包下载」
-            #    被切成只剩「下单表格」，盲测里当场表现为稳定命中→错。
-            #    判据：段数 ≥3 且平均段长 <15 字符 ⇒ 是词表，整行不动。
-            # 🔴 用**中位数**不用平均数：平均数会被首尾的长段带偏。
-            #    交付台那行 7 段 = [30, 3, 3, 4, 4, …]，中间五段全是短词（就是关键词表），
-            #    平均 19.4 判不出来、中位数 4 一眼就是。平均数被离群值带偏是这类判据的经典死法。
-            seg_lens = sorted(len(x) for x in segs)
-            median = seg_lens[len(seg_lens) // 2]
-            if len(segs) >= 3 and median < 15:
-                skipped.append((i, "正文是并列关键词列表，整条都是钩子", line[:60]))
+        def pack(budget):
+            """从正文开头按语义段往里装，返回 (装进去的段, 装不下的段)。"""
+            got, used = [], 0
+            for seg in segs:
+                add = len(seg) + (3 if got else 0)      # ' · '
+                if used + add > budget:
+                    break
+                got.append(seg)
+                used += add
+            return got, segs[len(got):]
+
+        # 🔴 豁免注释只在真需要时才占预算。无条件扣掉 47 字符，会让绝大多数
+        #    根本不需要豁免的行白白少留一半内容（asr 那行只剩 77 字符就是这么来的）。
+        base = LINE_LIMIT - len(hook) - len(sep)
+        kept_segs, dropped = pack(base)
+        if not kept_segs:
+            # 🔴 连第一段都装不下 ⇒ **截到预算内**，不是跳过。
+            #    这类行正是最该处理的：clip-pipeline 那行 1791 字符，一行占索引 10%。
+            if base > 30:
+                kept_segs = [body[:base - 1] + "…"]
+                dropped = segs
+            else:
+                skipped.append((i, f"钩子已占 {len(hook)} 字符，没有预算留正文", line[:60]))
                 out.append(line)
                 continue
-            head = segs[0] if segs else body
-            if len(head) > FALLBACK_MAX:
-                head = head[:FALLBACK_MAX] + "…"
-            if len(body) - len(head) < len(body) * MIN_GAIN_RATIO:
-                skipped.append((i, f"无锚点且只能省 {len(body)-len(head)} 字符，不值得搬", line[:60]))
-                out.append(line)
-                continue
-            anchors = [head]
-        # 预算按最坏情况留出豁免注释的位置（这一行到底要不要豁免，拼完才知道）
-        budget = LINE_LIMIT - len(EXEMPT)
-        kept = []
-        for c in anchors[:MAX_ANCHORS]:
-            if len(hook + sep + " ".join(kept + [c])) <= budget:
-                kept.append(c)
-        new_line = hook + (sep + " ".join(kept) if kept else "")
 
-        # 🔴 拿闸的判据比**最终这一行**，不是比 hook ——
-        #    从 body 捞回来的锚点里也可能带 hash，闸看整行，我只看 hook 就会漏判。
+        if not dropped:
+            skipped.append((i, "整条正文都装得下，不用搬", line[:60]))
+            out.append(line)
+            continue
+
+        new_line = hook + sep + " · ".join(kept_segs)
         if LOG_RE.search(SCRUB_RE.sub("", new_line)) and "闸四豁免" not in new_line:
-            new_line += EXEMPT
+            # 真的要豁免 ⇒ 这才把它的长度从预算里扣掉，重装一遍
+            kept_segs, dropped = pack(base - len(EXEMPT))
+            if not kept_segs and base - len(EXEMPT) > 30:
+                kept_segs = [body[:base - len(EXEMPT) - 1] + "…"]
+                dropped = segs
+            new_line = hook + sep + " · ".join(kept_segs) + EXEMPT
 
-        # 最终兜底：拼完仍超 200 就整行跳过，不为它松闸
+        body = " · ".join(dropped)
+
         if len(new_line) > LINE_LIMIT:
             skipped.append((i, f"成行后 {len(new_line)} 字符仍超 200", line[:60]))
             out.append(line)
             continue
 
         moves.append({"line": i, "target": os.path.basename(local[0]),
-                      "body": body, "hook": new_line, "anchors": len(kept)})
+                      "body": body, "hook": new_line, "anchors": len(kept_segs)})
         out.append(new_line)
 
     before = sum(len(l) for l in lines)
