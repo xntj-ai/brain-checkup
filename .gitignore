@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .DS_Store
 TODO.md
+
+# 平台粘贴截图落地目录，公开仓库里绝不提交（2026-11-21）
+.cruna-uploads/
